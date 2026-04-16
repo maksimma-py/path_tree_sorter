@@ -1,105 +1,222 @@
-# /// script
-# requires-python = ">=3.14"
-# dependencies = [
-#     "tqdm>=4.67.3",
-# ]
-# ///
-from sys import exit
-from collections import defaultdict
-from datetime import date
-from os import PathLike
+import sys
+from getpass import getpass
+from mimetypes import guess_file_type
 from pathlib import Path
-from time import sleep
 from tkinter.filedialog import askdirectory
-from typing import Callable, Iterable, NoReturn
-from tqdm import tqdm
+from typing import TYPE_CHECKING, Final
 
-type FileName = str
-type Days = dict[str, list[FileName]]
-type Months = dict[str, Days]
-type Years = dict[str, Months]
+from parser import PathTreeParser
 
-MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from os import PathLike
 
-class DateParser:
-    input_dir: str | PathLike
+type PathType = tuple[str, ...] | str
 
-    def __init__(self, 
-                 input_dir: str | PathLike | None = None, 
-                 output_dir: str | PathLike = r"output/",
-                 exclude: Iterable[str | PathLike] = ()) -> None:
-        self._input_dir = Path(input_dir) if input_dir is not None else Path.cwd()
-        self._output_dir = Path(output_dir).absolute()
-        self._exclude = {Path(p).name for p in exclude} | {self._output_dir}
 
-    def parse(self) -> Path:
-        self._date_tree = self._create_date_tree()
-        return self._build_result_tree()
+class FileTypeMap:
+    """Map for path keys and file type values with path formatting."""
 
-    def _create_date_tree(self) -> Years:
-        days_dd_generator: Callable[[], Days] = lambda: defaultdict(list)
-        months_dd_generator: Callable[[], Months] = lambda: defaultdict(days_dd_generator)
-        result: Years = defaultdict(months_dd_generator)
+    def __init__(self) -> None:
+        """Initialize an object."""
+        self._dict = {}
 
-        self.__list_iterdir = list(self._input_dir.iterdir())
-        with tqdm(total=len(self.__list_iterdir), colour="#ff44ff", desc="Парсим парсим парсим^^", leave=False, ascii=True) as pbar:
-            for file in self.__list_iterdir:
-                if file.name in self._exclude: continue
-                year, month, day, *_ = date.fromtimestamp(file.stat().st_birthtime).timetuple()
-                year, month, day = str(year), MONTHS[month-1], str(day)
-                result[year][month][day].append(file.as_posix())
-                pbar.update()
-                sleep(.05)
-        
-        return result
+    def set_format_return(self, path: Path, value: str | PathType) -> PathType:
+        """
+        Act like function wrapper for __setitem__ with formatting input.
 
-    def _build_result_tree(self) -> Path:
-        with tqdm(total=len(self.__list_iterdir), colour="#ff44ff", desc="Копируем копируем^^", leave=False, ascii=True) as pbar:
-            for year in self._date_tree:
-                for month in self._date_tree[year]:
-                    for day in self._date_tree[year][month]:
-                        for file in self._date_tree[year][month][day]:
-                            target_dir = self._output_dir / year / month / day
-                            target_dir.mkdir(parents=True, exist_ok=True)  
-                            Path(file).copy_into(target_dir, preserve_metadata=True)
-                            pbar.update()
-        return self._output_dir
-    
+        Args:
+            path (Path): input formatting path key
+            value (str | PathType): input value for self[path]
 
-def clear_input (s):
-    return "".join(s.split()).lower()
+        Returns:
+            PathType: formatted path
 
-def dir_get_and_check(msg: str, default: str | None = None) -> Path | NoReturn:
-    while True:
-        dir = input(msg) or default
-        if clear_input(dir) == "gui()":
-            dir = askdirectory(title="Введите путь до папки")
-        if not dir: 
-            msg = "Ты ничего не ввёл( ещё раз\n>"
-            continue
-        dir = Path(dir)
+        """
+        if isinstance(value, str):
+            value = (value,)
+        self[path] = value
+        return value
 
-        if dir.exists() and not dir.is_dir():
-            msg = "Это не папка( ещё раз\n>"
-        else:
-            break
-    
-    return dir
+    def get(self, path: Path) -> PathType | None:
+        """
+        Act like function wrapper for __getitem__.
 
-if __name__ == "__main__":     
+        Args:
+            path (Path): input path
+
+        Returns:
+            PathType | None: value of self[path]
+
+        """
+        return self[path]
+
+    def __getitem__(self, path: Path) -> PathType | None:
+        return self._dict.get(path.absolute().as_posix())
+
+    def __setitem__(self, path: Path, value: str | PathType) -> None:
+        if isinstance(value, str):
+            value = tuple(value.split())
+        self._dict[path.absolute().as_posix()] = value
+
+    def __contains__(self, path: Path) -> bool:
+        return path.absolute().as_posix() in self._dict
+
+
+class PathTypeSizeParser(PathTreeParser):
+    """Subclass of PathTreeParser."""
+
+    FILE_SIZE_CLASSES: Final = {
+        r"tiny": 1_000,
+        r"very small": 10_000,
+        r"small": 100_000,
+        r"moderate": 1_000_000,
+        r"medium": 10_000_000,
+        r"large": 100_000_000,
+        r"very large": 1_000_000_000,
+        r"huge": 10_000_000_000,
+        r"massive": float("inf"),
+    }
+
+    METHOD_2_TYPE: Final = {
+        "is_dir": "directory",
+        "is_mount": "mount",
+        "is_block_device": "block device",
+        "is_char_device": "character device",
+        "is_fifo": "fifo",
+        "is_socket": "socket",
+    }
+
+    def __init__(
+        self,
+        input_dir: str | PathLike,
+        output_dir: str | PathLike = r"output/",
+        exclude: Iterable[str] = (),
+    ) -> None:
+        """
+        Initialize an object of this class.
+
+        Args:
+            input_dir (str | PathLike): input directory
+            output_dir (str | PathLike, optional): output directory. Defaults to r"output/".
+            exclude (Iterable[str | PathLike], optional): excluded paths and glob-patterns. Defaults to ().
+
+        """
+        super().__init__(input_dir, output_dir, exclude)
+        self._memo: FileTypeMap = FileTypeMap()
+
+    def generate_key(self, path: str | PathLike) -> tuple[str, ...]:
+        """
+        Generate a tuple of strings for the tree branch with path type and subjective size.
+
+        Args:
+            path (str | PathLike): input path
+
+        Returns:
+            tuple[str]: output string's tuple
+
+        """
+        path = Path(path)
+        file_type = self.get_path_type(path)
+        size = self.get_path_subjective_size(path)
+        return *file_type, size
+
+    def get_path_type(self, path: Path) -> PathType:
+        """
+        Choice closest.
+
+        Args:
+            path (Path): _description_
+
+        Returns:
+            PathType: _description_
+
+        """
+        attempts = [
+            self._memo.get,
+            self._try_get_symlink,
+            self._try_get_file,
+            self._try_get_other,
+        ]
+        for attempt in attempts:
+            if (res := attempt(path)) is not None:
+                return self._memo.set_format_return(path, res)
+        return ("unknown",)
+
+    @staticmethod
+    def _try_get_file(path: Path) -> PathType | None:
+        if not path.is_file():
+            return None
+
+        if path.suffix.endswith(".lnk"):
+            return "windows link"
+
+        if (guess := guess_file_type(path)[0]) is not None:
+            return tuple(guess.split("/"))
+
+        return "unknown file"
+
+    def _try_get_symlink(self, path: Path) -> PathType | None:
+        if not path.is_symlink():
+            return None
+
+        self._memo[path] = "link"
+        src_type = self.get_path_type(path.readlink())
+
+        if src_type == ("link",):
+            return self._memo.set_format_return(path, "recursive link")
+
+        is_not_link = src_type and src_type[0] != "link"
+        if is_not_link:
+            src_type = ("link", *src_type)
+        return src_type
+
+    def _try_get_other(self, path: Path) -> PathType | None:
+        for method, type_ in self.METHOD_2_TYPE.items():
+            if hasattr(path, method) and getattr(path, method)():
+                return type_
+        return None
+
+    def get_path_subjective_size(self, path: Path) -> str:
+        """
+        Rate a path size based on self.FILE_SIZE_CLASSES.
+
+        Args:
+            path (Path): file which size is rating
+
+        Returns:
+            str: size rate
+
+        """
+        size = (
+            self._get_dir_size(path) if path.is_dir() else path.stat().st_size
+        )
+        for subjective_size, v in self.FILE_SIZE_CLASSES.items():
+            if size <= v:
+                return subjective_size
+        return "unknown"
+
+    def _get_dir_size(self, path: Path) -> int:
+        return sum(
+            sp.stat().st_size if sp.is_file() else self._get_dir_size(sp)
+            for sp in path.iterdir()
+        )
+
+
+# ruff: disable[T201]
+if __name__ == "__main__":
     try:
-        input_dir = dir_get_and_check('Введи путь до папки, из которой будем копировать\n(напиши "gui()" без кавычек, чтобы открыть окошко с вводом папки)\n> ')
-        output_dir = dir_get_and_check('Введи путь до папки, в которую будете копировать (если она не существует, то она сама создастся)\n(по умолчанию "output")> ', "output")
-        
-        if output_dir.exists() and list(output_dir.iterdir()):
-            if clear_input(input("Вы хотите, чтобы папки и файлы возможно перезаписалися?\n(y/n) > ")) == "n":
-                print("Тогда сохраните её или используйте другую папку")
-                sleep(5)
-                exit()
-        DateParser(input_dir, output_dir).parse()
+        print("Укажи папку из которой будем копировать файлы в дерево")
+        input_dir = askdirectory(mustexist=True)
+        print("Укажи папку в которую будем копировать")
+        output_dir = askdirectory()
+        print("Выполняем...")
+        result_dir = PathTypeSizeParser(input_dir, output_dir).parse()
+        print(f"Готово! Дерево было сохранено в {result_dir}")
     except KeyboardInterrupt:
-        exit()
-    except Exception as e:
-        print("Ошибка(((")
-        print(e)
-        sleep(5)
+        sys.exit()
+    except Exception as e:  # noqa: BLE001
+        print(f"Произошла ошибка!\n{e}")
+    finally:
+        getpass("Нажми Enter для выхода")
+# ruff: enable[T201]
